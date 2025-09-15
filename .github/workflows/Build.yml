@@ -1,124 +1,47 @@
-#
-# Copyright (C) 2022 Ing <https://github.com/wjz304>
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
-#
-
-name: Build OpenCore-Mod
-
-on:
-  push:
-  schedule:
-    - cron: "20 */6 * * *"
-  workflow_dispatch:
-
-env:
-  PROJECT_TYPE: UEFI
-  FORCE_INSTALL: 1
-  HAS_OPENSSL_BUILD: 1
-  HAS_OPENSSL_W32BUILD: 0
-  WERROR: 1
-
-jobs:
-  build-macos:
-    name: macOS XCODE5
-    runs-on: macos-latest
-    env:
-      JOB_TYPE: BUILD
-    steps:
-      - name: Checkout
-        uses: actions/checkout@main
-
-      - name: Initialization environment
-        run: |
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global user.name "github-actions[bot]"
-          sudo systemsetup -settimezone "Asia/Shanghai"
-
-      - name: Install Linux Toolchain
-        run: |
-          brew tap FiloSottile/homebrew-musl-cross
-          brew install musl-cross
-          brew install openssl mingw-w64 nasm jq
-
-          curl -skL https://raw.githubusercontent.com/acidanthera/MaciASL/master/Dist/iasl-stable -o iasl
-          sudo mv iasl /usr/local/bin/iasl
-          sudo chmod +x /usr/local/bin/iasl
-
-      - name: CI Bootstrap
-        run: |
-          git config --global http.postBuffer 1048576000
-          git clone --depth=100 https://gitee.com/btwise/OpenCore_NO_ACPI.git OpenCore_NO_ACPI
-          cd ./OpenCore_NO_ACPI
-
-          src=$(/usr/bin/curl -LfsS https://raw.githubusercontent.com/acidanthera/ocbuild/master/ci-bootstrap.sh) && eval "$src" || exit 1
-
-          # jq parses json, # token https://docs.github.com/en/developers/apps/building-oauth-apps/authorizing-oauth-apps  
-          latesttag=$(curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -sL https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest | jq -r .tag_name)
-          latestgit=${latesttag#*_}
-          currenttag=$(grep OPEN_CORE_VERSION Include/Acidanthera/Library/OcMainLib.h | sed 's/.*"\(.*\)".*/\1/' | grep -E '^[0-9.]+$')_$(git rev-parse --short HEAD)
-          currentgit=${currenttag#*_}
-
-          echo latesttag: $latesttag
-          echo latestgit: $latestgit
-          echo currenttag: $currenttag
-          echo currentgit: $currentgit
-
-          if [ "${latesttag}" == "${currenttag}" ]; then
-            echo "isNew=false" >> $GITHUB_ENV
-          else
-            echo "isNew=true" >> $GITHUB_ENV
-            echo "currenttag=${currenttag}" >> $GITHUB_ENV
-            echo "gitrevhead=${currentgit}" >> $GITHUB_ENV
-            echo 'gitupgrade<<EOF' >> $GITHUB_ENV
-            [ "${latestgit}" == "null" ] && latestgit=.
-            git log ${latestgit}..${currentgit} --oneline >> $GITHUB_ENV
-            echo 'EOF' >> $GITHUB_ENV
-          fi
-          echo ${{ env.isNew }}
-          echo ${{ env.currenttag }}
-          echo ${{ env.gitrevhead }}
-          echo ${{ env.gitupgrade }}
-
-      - name: build Duet
-        if: env.isNew == 'true'
-        run: |
-          # sed -i.bak "s|https://gitee.com/btwise/ocbuild/raw/master/efibuild.sh|https://raw.githubusercontent.com/acidanthera/ocbuild/master/efibuild.sh|" OpenCore_NO_ACPI/build_duet_cn.tool
-          cd OpenCore_NO_ACPI
-          ./build_duet_cn.tool
-
-      - name: build OC
-        if: env.isNew == 'true'
-        run: |
-          # sed -i.bak "s|https://gitee.com/btwise/ocbuild/raw/master/efibuild.sh|https://raw.githubusercontent.com/acidanthera/ocbuild/master/efibuild.sh|" OpenCore_NO_ACPI/build_oc_cn.tool
-          cd OpenCore_NO_ACPI
-          ./build_oc_cn.tool
-
-      - name: Upload to Artifacts
-        if: env.isNew == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: macOS XCODE5 Artifacts
-          path: OpenCore_NO_ACPI/Binaries/*.zip
-
-      - name: Commit and Push
-        if: env.isNew == 'true'
-        run: |
-          echo ${{ env.currenttag }} > latest
-          git add latest
-          git commit -m "update $(date +%Y-%m-%d" "%H:%M:%S)"
-          git push -f
-
-      - name: Upload to Release
-        if: env.isNew == 'true'
-        uses: softprops/action-gh-release@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ env.currenttag }}
-          body: |
-            Changes:  
-            ${{ env.gitupgrade }}  
-            [View on gitee](https://gitee.com/btwise/OpenCore_NO_ACPI/commits/${{ env.gitrevhead }})
-          files: OpenCore_NO_ACPI/Binaries/*.zip
+name: oc
+services:
+  dev-edk2:
+    build:
+      context: Dockerfiles/oc-dev
+      target: oc-dev-edk2
+    environment:
+      - ARCHS
+      - ARCHS_EXT
+      - TARGETS
+      - RTARGETS
+      - TOOLCHAINS
+      - SKIP_TESTS
+      - SKIP_BUILD
+      - SKIP_PACKAGE
+      - BUILD_ARGUMENTS
+    volumes:
+      - ${PWD}:/com.docker.devenvironments.code
+    working_dir: /com.docker.devenvironments.code
+  dev-docs:
+    build:
+      context: Dockerfiles/oc-dev
+      target: oc-dev-docs
+    volumes:
+      - ${PWD}:/com.docker.devenvironments.code
+    working_dir: /com.docker.devenvironments.code
+  build-oc:
+    extends:
+      service: dev-edk2
+    entrypoint:
+      - /bin/bash
+      - -c
+      - "{ . ~/.edk2_rc.sh && eval \"$$(/usr/bin/curl -LfsS https://raw.githubusercontent.com/acidanthera/ocbuild/master/ci-bootstrap.sh)\" && ./build_oc.tool ; } || exit 1"
+  build-duet:
+    extends:
+      service: dev-edk2
+    entrypoint:
+      - /bin/bash
+      - -c
+      - "{ . ~/.edk2_rc.sh && eval \"$$(/usr/bin/curl -LfsS https://raw.githubusercontent.com/acidanthera/ocbuild/master/ci-bootstrap.sh)\" && ./build_duet.tool ; } || exit 1"
+  build-docs:
+    extends:
+      service: dev-docs
+    entrypoint:
+      - /bin/bash
+      - -c
+      - "{ doxygen Doxyfile &> log.txt && cd Doxy/latex && make pdf &> log.txt ; } || { tail -200 log.txt ; exit 1 ; }"
